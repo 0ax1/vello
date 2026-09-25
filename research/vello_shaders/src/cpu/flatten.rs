@@ -643,13 +643,18 @@ fn read_neighboring_segment(
     let tag = compute_tag_monoid(ix, pathtags, tag_monoids);
     let pts = read_path_segment(&tag, true, pathdata);
 
-    let is_closed = (tag.tag_byte & PATH_TAG_SEG_TYPE) == PATH_TAG_LINETO;
+    let is_line = (tag.tag_byte & PATH_TAG_SEG_TYPE) == PATH_TAG_LINETO;
     let is_stroke_cap_marker = (tag.tag_byte & PathTag::SUBPATH_END_BIT) != 0;
-    let do_join = !is_stroke_cap_marker || is_closed;
-    let tangent = if is_stroke_cap_marker {
+    let do_join = !is_stroke_cap_marker || is_line;
+    let tangent = if is_stroke_cap_marker || is_line {
         pts.p3 - pts.p0
     } else {
-        cubic_start_tangent(pts.p0, pts.p1, pts.p2, pts.p3)
+        let tangent = cubic_start_tangent(pts.p0, pts.p1, pts.p2, pts.p3);
+        if tangent.length_squared() < TANGENT_THRESH.powi(2) {
+            Vec2::new(TANGENT_THRESH, 0.)
+        } else {
+            tangent
+        }
     };
     NeighboringSegment { do_join, tangent }
 }
@@ -731,32 +736,39 @@ fn flatten_main(
                     // Read the neighboring segment.
                     let neighbor =
                         read_neighboring_segment(ix + 1, pathtags, pathdata, tag_monoids);
-                    let tan_prev = cubic_end_tangent(pts.p0, pts.p1, pts.p2, pts.p3);
+                    let is_line = seg_type == PATH_TAG_LINETO;
+                    // Match the cap and join directions without degree-raising roundoff.
+                    let (tan_start, tan_prev) = if is_line {
+                        let tangent = pts.p3 - pts.p0;
+                        (tangent, tangent)
+                    } else {
+                        (
+                            cubic_start_tangent(pts.p0, pts.p1, pts.p2, pts.p3),
+                            cubic_end_tangent(pts.p0, pts.p1, pts.p2, pts.p3),
+                        )
+                    };
                     let tan_next = neighbor.tangent;
-                    let tan_start = cubic_start_tangent(pts.p0, pts.p1, pts.p2, pts.p3);
                     // TODO: be consistent w/ robustness here
 
                     // TODO: add NaN assertions to CPU shaders PR (when writing lines)
                     // TODO: not all zero-length segments are getting filtered out
                     // TODO: this is a hack. How to handle caps on degenerate stroke?
                     // TODO: debug tricky stroke by isolation
-                    let tan_start = if tan_start.length_squared() < TANGENT_THRESH.powi(2) {
-                        Vec2::new(TANGENT_THRESH, 0.)
-                    } else {
-                        tan_start
-                    };
-                    let tan_prev = if tan_prev.length_squared() < TANGENT_THRESH.powi(2) {
+                    let tan_start =
+                        if !is_line && tan_start.length_squared() < TANGENT_THRESH.powi(2) {
+                            Vec2::new(TANGENT_THRESH, 0.)
+                        } else {
+                            tan_start
+                        };
+                    let tan_prev = if !is_line && tan_prev.length_squared() < TANGENT_THRESH.powi(2)
+                    {
                         Vec2::new(TANGENT_THRESH, 0.)
                     } else {
                         tan_prev
                     };
-                    let tan_next = if tan_next.length_squared() < TANGENT_THRESH.powi(2) {
-                        Vec2::new(TANGENT_THRESH, 0.)
-                    } else {
-                        tan_next
-                    };
 
-                    let n_start = offset * Vec2::new(-tan_start.y, tan_start.x).normalize();
+                    let start_offset_tangent = offset * tan_start.normalize();
+                    let n_start = Vec2::new(-start_offset_tangent.y, start_offset_tangent.x);
                     let offset_tangent = offset * tan_prev.normalize();
                     let n_prev = Vec2::new(-offset_tangent.y, offset_tangent.x);
                     let tan_next_norm = tan_next.normalize();
@@ -764,29 +776,50 @@ fn flatten_main(
                     log!("@ tan_prev: {:#?}", tan_prev);
                     log!("@ tan_next: {:#?}", tan_next);
 
-                    // Render offset curves
-                    flatten_euler(
-                        &pts,
-                        path_ix,
-                        &transform,
-                        offset,
-                        pts.p0 + n_start,
-                        pts.p3 + n_prev,
-                        &mut line_ix,
-                        lines,
-                        &mut bbox,
-                    );
-                    flatten_euler(
-                        &pts,
-                        path_ix,
-                        &transform,
-                        -offset,
-                        pts.p0 - n_start,
-                        pts.p3 - n_prev,
-                        &mut line_ix,
-                        lines,
-                        &mut bbox,
-                    );
+                    if is_line {
+                        output_line_with_transform(
+                            path_ix,
+                            pts.p0 + n_start,
+                            pts.p3 + n_prev,
+                            &transform,
+                            &mut line_ix,
+                            lines,
+                            &mut bbox,
+                        );
+                        output_line_with_transform(
+                            path_ix,
+                            pts.p3 - n_prev,
+                            pts.p0 - n_start,
+                            &transform,
+                            &mut line_ix,
+                            lines,
+                            &mut bbox,
+                        );
+                    } else {
+                        // Render offset curves
+                        flatten_euler(
+                            &pts,
+                            path_ix,
+                            &transform,
+                            offset,
+                            pts.p0 + n_start,
+                            pts.p3 + n_prev,
+                            &mut line_ix,
+                            lines,
+                            &mut bbox,
+                        );
+                        flatten_euler(
+                            &pts,
+                            path_ix,
+                            &transform,
+                            -offset,
+                            pts.p0 - n_start,
+                            pts.p3 - n_prev,
+                            &mut line_ix,
+                            lines,
+                            &mut bbox,
+                        );
+                    }
 
                     if neighbor.do_join {
                         draw_join(

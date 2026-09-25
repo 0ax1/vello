@@ -811,12 +811,15 @@ fn read_neighboring_segment(ix: u32) -> NeighboringSegment {
     let tag = compute_tag_monoid(ix);
     let pts = read_path_segment(tag, true);
 
-    let is_closed = (tag.tag_byte & PATH_TAG_SEG_TYPE) == PATH_TAG_LINETO;
+    let is_line = (tag.tag_byte & PATH_TAG_SEG_TYPE) == PATH_TAG_LINETO;
     let is_stroke_cap_marker = (tag.tag_byte & PATH_TAG_SUBPATH_END) != 0u;
-    let do_join = !is_stroke_cap_marker || is_closed;
+    let do_join = !is_stroke_cap_marker || is_line;
     var tangent = pts.p3 - pts.p0;
-    if !is_stroke_cap_marker {
+    if !is_stroke_cap_marker && !is_line {
         tangent = cubic_start_tangent(pts.p0, pts.p1, pts.p2, pts.p3);
+        if dot(tangent, tangent) < TANGENT_THRESH * TANGENT_THRESH {
+            tangent = vec2(TANGENT_THRESH, 0.);
+        }
     }
     return NeighboringSegment(do_join, tangent);
 }
@@ -877,26 +880,36 @@ fn main(
             } else {
                 // Read the neighboring segment.
                 let neighbor = read_neighboring_segment(ix + 1u);
-                var tan_start = cubic_start_tangent(pts.p0, pts.p1, pts.p2, pts.p3);
-                if dot(tan_start, tan_start) < TANGENT_THRESH * TANGENT_THRESH {
+                let is_line = seg_type == PATH_TAG_LINETO;
+                // Degree raising can rotate a short line's tangent through rounding.
+                // Use the original chord so its outline agrees with caps and joins.
+                var tan_start = pts.p3 - pts.p0;
+                var tan_prev = tan_start;
+                if !is_line {
+                    tan_start = cubic_start_tangent(pts.p0, pts.p1, pts.p2, pts.p3);
+                    tan_prev = cubic_end_tangent(pts.p0, pts.p1, pts.p2, pts.p3);
+                }
+                if !is_line && dot(tan_start, tan_start) < TANGENT_THRESH * TANGENT_THRESH {
                     tan_start = vec2(TANGENT_THRESH, 0.);
                 }
-                var tan_prev = cubic_end_tangent(pts.p0, pts.p1, pts.p2, pts.p3);
-                if dot(tan_prev, tan_prev) < TANGENT_THRESH * TANGENT_THRESH {
+                if !is_line && dot(tan_prev, tan_prev) < TANGENT_THRESH * TANGENT_THRESH {
                     tan_prev = vec2(TANGENT_THRESH, 0.);
                 }
-                var tan_next = neighbor.tangent;
-                if dot(tan_next, tan_next) < TANGENT_THRESH * TANGENT_THRESH {
-                    tan_next = vec2(TANGENT_THRESH, 0.);
-                }
-                let n_start = offset * normalize(vec2(-tan_start.y, tan_start.x));
+                let tan_next = neighbor.tangent;
+                let n_start = (offset * normalize(tan_start)).yx * vec2f(-1., 1.);
                 let offset_tangent = offset * normalize(tan_prev);
                 let n_prev = offset_tangent.yx * vec2f(-1., 1.);
                 let n_next = offset * normalize(tan_next).yx * vec2f(-1., 1.);
 
-                // Render offset curves
-                flatten_euler(pts, path_ix, transform, offset, pts.p0 + n_start, pts.p3 + n_prev);
-                flatten_euler(pts, path_ix, transform, -offset, pts.p0 - n_start, pts.p3 - n_prev);
+                if is_line {
+                    output_two_lines_with_transform(path_ix,
+                        pts.p0 + n_start, pts.p3 + n_prev,
+                        pts.p3 - n_prev, pts.p0 - n_start, transform);
+                } else {
+                    // Render offset curves
+                    flatten_euler(pts, path_ix, transform, offset, pts.p0 + n_start, pts.p3 + n_prev);
+                    flatten_euler(pts, path_ix, transform, -offset, pts.p0 - n_start, pts.p3 - n_prev);
+                }
 
                 if neighbor.do_join {
                     draw_join(path_ix, style_flags, pts.p3, tan_prev, tan_next,
