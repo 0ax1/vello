@@ -844,6 +844,91 @@ const EPSILON: f32 = 1e-12;
 mod tests {
     use super::*;
 
+    // A one-ULP line is nondegenerate, but interpolating one third of the way
+    // along it can round back to its start, producing a zero cap tangent.
+    fn short_lines() -> impl Iterator<Item = ([f32; 2], [f32; 2])> {
+        [[400.0_f32, 288.0_f32], [-400.0, -288.0]]
+            .into_iter()
+            .flat_map(|p0| {
+                [
+                    [p0[0].next_up(), p0[1]],
+                    [p0[0].next_down(), p0[1]],
+                    [p0[0], p0[1].next_up()],
+                    [p0[0], p0[1].next_down()],
+                    [p0[0].next_up(), p0[1].next_up()],
+                    [p0[0].next_down(), p0[1].next_up()],
+                ]
+                .into_iter()
+                .map(move |p1| (p0, p1))
+            })
+    }
+
+    #[test]
+    fn short_line_open_cap_has_nonzero_tangent() {
+        for (p0, p1) in short_lines() {
+            for end_with_move in [false, true] {
+                let mut tags = Vec::new();
+                let mut data = Vec::new();
+                let mut n_segments = 0;
+                let mut n_paths = 0;
+                let mut encoder =
+                    PathEncoder::new(&mut tags, &mut data, &mut n_segments, &mut n_paths, false);
+                encoder.move_to(p0[0], p0[1]);
+                encoder.line_to(p1[0], p1[1]);
+                if end_with_move {
+                    encoder.move_to(0.0, 0.0);
+                }
+                encoder.finish(true);
+
+                assert_eq!(n_segments, 2, "the line and its cap marker must survive");
+                let points: &[[f32; 2]] = bytemuck::cast_slice(&data);
+                assert_eq!(points.len(), 4);
+                assert_eq!(points[0], p0);
+                assert_eq!(points[1], p1);
+                assert_eq!(points[2], p0);
+                assert_ne!(
+                    points[3], p0,
+                    "zero start-cap tangent for {p0:?} -> {p1:?}, end_with_move={end_with_move}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn short_line_closed_cap_marker_is_preserved() {
+        for (p0, p1) in short_lines() {
+            for explicit_return in [false, true] {
+                let mut tags = Vec::new();
+                let mut data = Vec::new();
+                let mut n_segments = 0;
+                let mut n_paths = 0;
+                let mut encoder =
+                    PathEncoder::new(&mut tags, &mut data, &mut n_segments, &mut n_paths, false);
+                encoder.move_to(p0[0], p0[1]);
+                encoder.line_to(p1[0], p1[1]);
+                if explicit_return {
+                    encoder.line_to(p0[0], p0[1]);
+                }
+                encoder.close();
+                encoder.finish(true);
+
+                assert_eq!(
+                    n_segments, 3,
+                    "the line, closing line and marker must survive for {p0:?} -> {p1:?}"
+                );
+                let points: &[[f32; 2]] = bytemuck::cast_slice(&data);
+                assert_eq!(points.len(), 4);
+                assert_eq!(points[2], p0);
+                assert_ne!(points[3], p0, "the closing join needs a nonzero tangent");
+                assert!(
+                    !tags[1].is_subpath_end(),
+                    "the closing line is not a marker"
+                );
+                assert!(tags[2].is_subpath_end(), "the marker must end the subpath");
+            }
+        }
+    }
+
     #[test]
     fn test_fill_style() {
         assert_eq!(Some(Fill::NonZero), Style::from_fill(Fill::NonZero).fill());

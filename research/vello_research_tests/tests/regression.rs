@@ -7,13 +7,49 @@ use scenes::ImageCache;
 use scenes::SimpleText;
 use vello::{
     AaConfig, Scene,
-    kurbo::{Affine, Rect, RoundedRect, Stroke},
+    kurbo::{Affine, BezPath, Cap, Rect, RoundedRect, Stroke},
     peniko::{
         Color, ColorStop, Extend, Gradient, ImageFormat, ImageQuality, InterpolationAlphaSpace,
         color::palette,
     },
 };
 use vello_research_tests::{TestParams, smoke_snapshot_test_sync, snapshot_test_sync};
+
+/// A one-ULP dash at a tile boundary must not fill the tiles to its right.
+#[test]
+#[cfg_attr(skip_gpu_tests, ignore)]
+fn short_line_does_not_leak_coverage() {
+    let mut path = BezPath::new();
+    // Keep the path bounds wider than the tiny dash, as in a dashed grid.
+    for y in [264.0, 312.0] {
+        path.move_to((384.0, y));
+        path.line_to((448.0, y));
+    }
+    path.move_to((400.0, 288.0));
+    path.line_to((f64::from(400.0_f32.next_up()), 288.0));
+
+    let mut scene = Scene::new();
+    scene.stroke(
+        &Stroke::new(1.25).with_caps(Cap::Butt),
+        Affine::translate((-384.0, -256.0)),
+        palette::css::WHITE,
+        None,
+        &path,
+    );
+    let mut params = TestParams::new("short_line_does_not_leak_coverage", 64, 64);
+    params.anti_aliasing = AaConfig::Msaa16;
+    let image = vello_research_tests::render_then_debug_sync(&scene, &params).unwrap();
+    for y in 16..48 {
+        for x in 32..64 {
+            let offset = (y * 64 + x) * 4;
+            assert_eq!(
+                &image.data.data()[offset..offset + 4],
+                &[0, 0, 0, 255],
+                "unexpected coverage to the right of the dash at ({x}, {y})"
+            );
+        }
+    }
+}
 
 /// Test created from <https://github.com/linebender/vello/issues/616>
 #[test]
