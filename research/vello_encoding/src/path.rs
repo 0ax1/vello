@@ -786,10 +786,10 @@ impl<'a> PathEncoder<'a> {
     fn start_tangent_for_line(&self, p1: (f32, f32)) -> Option<(f32, f32)> {
         let p0 = (self.first_point[0], self.first_point[1]);
         let pt = if (p1.0 - p0.0).abs() > EPSILON || (p1.1 - p0.1).abs() > EPSILON {
-            (
-                p0.0 + 1. / 3. * (p1.0 - p0.0),
-                p0.1 + 1. / 3. * (p1.1 - p0.1),
-            )
+            // Only the tangent direction is needed. Interpolating a cubic control
+            // point can round back to p0 for short lines, leaving a zero tangent
+            // in the stroke cap marker even though the line is nondegenerate.
+            p1
         } else {
             return None;
         };
