@@ -7,7 +7,7 @@ use scenes::ImageCache;
 use scenes::SimpleText;
 use vello::{
     AaConfig, Scene,
-    kurbo::{Affine, BezPath, Cap, Rect, RoundedRect, Stroke},
+    kurbo::{Affine, BezPath, Cap, Join, Rect, RoundedRect, Stroke},
     peniko::{
         Color, ColorStop, Extend, Gradient, ImageFormat, ImageQuality, InterpolationAlphaSpace,
         color::palette,
@@ -47,6 +47,68 @@ fn short_line_does_not_leak_coverage() {
                 &[0, 0, 0, 255],
                 "unexpected coverage to the right of the dash at ({x}, {y})"
             );
+        }
+    }
+}
+
+/// A microscopic diagonal must not leak coverage into distant tiles.
+#[test]
+#[cfg_attr(skip_gpu_tests, ignore)]
+fn short_diagonal_does_not_leak_coverage() {
+    // One f32 ULP at the source coordinates. Degree raising (2u, u) rounds
+    // C1 - A to (u, 0), which must not disagree with the start cap tangent.
+    let u = 2.0_f64.powi(-15);
+    let mut params = TestParams::new("short_diagonal_does_not_leak_coverage", 128, 96);
+    params.anti_aliasing = AaConfig::Msaa16;
+    for (width, scale, fraction, vx, vy, (ox, oy), u) in [
+        (1.5, 1.0, 0.75, 2.0, 1.0, (400.0, 288.0), u),
+        (1.5, 1.0, 0.75, 2.0, -1.0, (400.0, 288.0), u),
+        (1.5, 1.0, 0.75, -2.0, 1.0, (400.0, 288.0), u),
+        (1.25, 1.0, 0.25, 1.0, 2.0, (400.0, 288.0), u),
+        (3.0, 2.0, 0.25, 1.0, 2.0, (400.0, 288.0), u),
+        // Nonzero tangents below 1e-6 must retain their direction too.
+        (1.5, 1.0, 0.75, 2.0, 1.0, (0.0, 0.0), 1e-7),
+    ] {
+        let mut path = BezPath::new();
+        // Keep broad bounds in the same path, as in a dashed grid.
+        for y in [oy - 24.0, oy + 24.0] {
+            path.move_to((ox - 16.0, y));
+            path.line_to((ox + 48.0, y));
+        }
+        path.move_to((ox, oy));
+        path.line_to((ox + vx * u, oy + vy * u));
+        let mut joined = path.clone();
+        joined.line_to((ox - 4.0, oy + 4.0));
+        let mut closed = joined.clone();
+        closed.close_path();
+        let transform = Affine::translate((32.0 + fraction, 48.0 + fraction))
+            * Affine::scale(scale)
+            * Affine::translate((-ox, -oy));
+        for cap in [Cap::Butt, Cap::Round, Cap::Square] {
+            let mut scene = Scene::new();
+            let stroke = Stroke::new(width).with_caps(cap).with_join(Join::Round);
+            // Separate draws prevent winding cancellation between the isolated
+            // dash, its outgoing join, and joins across a closed subpath.
+            for shape in [&path, &joined, &closed] {
+                scene.stroke(&stroke, transform, palette::css::WHITE, None, shape);
+            }
+            for use_cpu in [false, true] {
+                params.use_cpu = use_cpu;
+                let image = vello_research_tests::render_then_debug_sync(&scene, &params).unwrap();
+                // Over 30 pixels right of the dash, beyond all caps/round joins,
+                // and between the bounds-widening lines at both scales.
+                // Ignore AA near the microscopic geometry.
+                for y in 40..56 {
+                    for x in 64..128 {
+                        let offset = (y * 128 + x) * 4;
+                        assert_eq!(
+                            &image.data.data()[offset..offset + 4],
+                            &[0, 0, 0, 255],
+                            "unexpected distant coverage at ({x}, {y}); use_cpu={use_cpu}, cap={cap:?}, width={width}, scale={scale}, fractional translation=({fraction}, {fraction}), direction=({vx}, {vy}), origin=({ox}, {oy}), u={u}"
+                        );
+                    }
+                }
+            }
         }
     }
 }
