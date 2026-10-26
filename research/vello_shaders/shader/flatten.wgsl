@@ -811,11 +811,12 @@ fn read_neighboring_segment(ix: u32) -> NeighboringSegment {
     let tag = compute_tag_monoid(ix);
     let pts = read_path_segment(tag, true);
 
-    let is_closed = (tag.tag_byte & PATH_TAG_SEG_TYPE) == PATH_TAG_LINETO;
+    let is_line = (tag.tag_byte & PATH_TAG_SEG_TYPE) == PATH_TAG_LINETO;
     let is_stroke_cap_marker = (tag.tag_byte & PATH_TAG_SUBPATH_END) != 0u;
-    let do_join = !is_stroke_cap_marker || is_closed;
+    let do_join = !is_stroke_cap_marker || is_line;
+    // Must match `tan_start` in `main`.
     var tangent = pts.p3 - pts.p0;
-    if !is_stroke_cap_marker {
+    if !is_stroke_cap_marker && !is_line {
         tangent = cubic_start_tangent(pts.p0, pts.p1, pts.p2, pts.p3);
     }
     return NeighboringSegment(do_join, tangent);
@@ -865,8 +866,12 @@ fn main(
             let is_stroke_cap_marker = (tag.tag_byte & PATH_TAG_SUBPATH_END) != 0u;
             if is_stroke_cap_marker {
                 if is_open {
-                    // Draw start cap
-                    let tangent = pts.p3 - pts.p0;
+                    // Draw start cap. Clamp the tangent like `tan_start` of the first segment so
+                    // that the cap meets the segment's outline.
+                    var tangent = pts.p3 - pts.p0;
+                    if dot(tangent, tangent) < TANGENT_THRESH * TANGENT_THRESH {
+                        tangent = vec2(TANGENT_THRESH, 0.);
+                    }
                     let offset_tangent = offset * normalize(tangent);
                     let n = offset_tangent.yx * vec2f(-1., 1.);
                     draw_cap(path_ix, (style_flags & STYLE_FLAGS_START_CAP_MASK) >> 2u,
@@ -877,11 +882,18 @@ fn main(
             } else {
                 // Read the neighboring segment.
                 let neighbor = read_neighboring_segment(ix + 1u);
-                var tan_start = cubic_start_tangent(pts.p0, pts.p1, pts.p2, pts.p3);
+                // Use a line's chord as both of its tangents, as its stroke cap marker does.
+                // Degree raising can round a short line's control points off the chord, which
+                // would twist the outline and detach it from the start cap or preceding join.
+                var tan_start = pts.p3 - pts.p0;
+                var tan_prev = tan_start;
+                if seg_type != PATH_TAG_LINETO {
+                    tan_start = cubic_start_tangent(pts.p0, pts.p1, pts.p2, pts.p3);
+                    tan_prev = cubic_end_tangent(pts.p0, pts.p1, pts.p2, pts.p3);
+                }
                 if dot(tan_start, tan_start) < TANGENT_THRESH * TANGENT_THRESH {
                     tan_start = vec2(TANGENT_THRESH, 0.);
                 }
-                var tan_prev = cubic_end_tangent(pts.p0, pts.p1, pts.p2, pts.p3);
                 if dot(tan_prev, tan_prev) < TANGENT_THRESH * TANGENT_THRESH {
                     tan_prev = vec2(TANGENT_THRESH, 0.);
                 }

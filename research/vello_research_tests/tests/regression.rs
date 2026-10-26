@@ -7,7 +7,7 @@ use scenes::ImageCache;
 use scenes::SimpleText;
 use vello::{
     AaConfig, Scene,
-    kurbo::{Affine, Rect, RoundedRect, Stroke},
+    kurbo::{Affine, BezPath, Cap, Rect, RoundedRect, Stroke},
     peniko::{
         Color, ColorStop, Extend, Gradient, ImageFormat, ImageQuality, InterpolationAlphaSpace,
         color::palette,
@@ -263,4 +263,50 @@ fn many_bins_gpu() {
 #[cfg_attr(skip_gpu_tests, ignore)]
 fn many_bins_cpu() {
     many_bins(true);
+}
+
+/// Strokes of very short lines, such as dash fragments, must not leak coverage.
+fn tiny_line_strokes_watertight(use_cpu: bool) {
+    let mut path = BezPath::new();
+    // Shorter than the stroker's tangent threshold.
+    path.move_to((0., 0.));
+    path.line_to((2e-7, 1e-7));
+    // Degree raising rounds the control points of this line off its chord.
+    let ulp = f64::from(16_f32.next_up()) - 16.;
+    path.move_to((0., 16.));
+    path.line_to((2. * ulp, 16. + ulp));
+    // Widen the path's bounding box outside the image, so that leaked coverage spreads into it.
+    path.move_to((-16., -24.));
+    path.line_to((48., -24.));
+    let mut scene = Scene::new();
+    // At this sub-pixel offset, gaps in the outlines leak coverage up to the image's right edge.
+    scene.stroke(
+        &Stroke::new(1.5).with_caps(Cap::Butt),
+        Affine::translate((16.75, 16.75)),
+        palette::css::WHITE,
+        None,
+        &path,
+    );
+    let params = TestParams {
+        use_cpu,
+        ..TestParams::new("tiny_line_strokes_watertight", 64, 64)
+    };
+    let image = vello_research_tests::render_then_debug_sync(&scene, &params).unwrap();
+    let pixels = image.data.data();
+    assert!(
+        pixels.chunks_exact(4).all(|pixel| pixel == [0, 0, 0, 255]),
+        "butt capped lines of nearly zero length should not cover any pixels"
+    );
+}
+
+#[test]
+#[cfg_attr(skip_gpu_tests, ignore)]
+fn tiny_line_strokes_watertight_gpu() {
+    tiny_line_strokes_watertight(false);
+}
+
+#[test]
+#[cfg_attr(skip_gpu_tests, ignore)]
+fn tiny_line_strokes_watertight_cpu() {
+    tiny_line_strokes_watertight(true);
 }

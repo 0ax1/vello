@@ -786,10 +786,9 @@ impl<'a> PathEncoder<'a> {
     fn start_tangent_for_line(&self, p1: (f32, f32)) -> Option<(f32, f32)> {
         let p0 = (self.first_point[0], self.first_point[1]);
         let pt = if (p1.0 - p0.0).abs() > EPSILON || (p1.1 - p0.1).abs() > EPSILON {
-            (
-                p0.0 + 1. / 3. * (p1.0 - p0.0),
-                p0.1 + 1. / 3. * (p1.1 - p0.1),
-            )
+            // The stroker uses a line's chord as its start tangent. A point one third of the
+            // way along a very short line can round back to `p0`.
+            p1
         } else {
             return None;
         };
@@ -874,5 +873,25 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn short_line_stroke_cap_marker_has_nonzero_tangent() {
+        let p0 = [400.0_f32, 288.0];
+        // A point one third of the way along this one-ULP line rounds back to `p0`.
+        let p1 = [p0[0].next_up(), p0[1]];
+        let mut tags = Vec::new();
+        let mut data = Vec::new();
+        let mut n_segments = 0;
+        let mut n_paths = 0;
+        let mut encoder =
+            PathEncoder::new(&mut tags, &mut data, &mut n_segments, &mut n_paths, false);
+        encoder.move_to(p0[0], p0[1]);
+        encoder.line_to(p1[0], p1[1]);
+        encoder.finish(true);
+        // The line is followed by its stroke cap marker: the start point and the end of the
+        // start tangent.
+        let points: &[[f32; 2]] = bytemuck::cast_slice(&data);
+        assert_eq!(points, [p0, p1, p0, p1]);
     }
 }
