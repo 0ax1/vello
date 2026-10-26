@@ -110,6 +110,14 @@ pub async fn get_scene_image(
     params: &TestParams,
     scene: &Scene,
 ) -> Result<ImageData, anyhow::Error> {
+    get_scenes_image(params, &[scene]).await
+}
+
+/// Renders `scenes` in order with a single renderer and returns the image of the last one.
+pub async fn get_scenes_image(
+    params: &TestParams,
+    scenes: &[&Scene],
+) -> Result<ImageData, anyhow::Error> {
     let (device, queue) = &*WGPU_DEVICE_QUEUE;
     let mut renderer = vello::Renderer::new(
         device,
@@ -145,9 +153,11 @@ pub async fn get_scene_image(
         view_formats: &[],
     });
     let view = target.create_view(&wgpu::TextureViewDescriptor::default());
-    renderer
-        .render_to_texture(device, queue, scene, &view, &render_params)
-        .or_else(|_| bail!("Got non-Send/Sync error from rendering"))?;
+    for scene in scenes {
+        renderer
+            .render_to_texture(device, queue, scene, &view, &render_params)
+            .or_else(|_| bail!("Got non-Send/Sync error from rendering"))?;
+    }
     let padded_byte_width = (width * 4).next_multiple_of(256);
     let buffer_size = padded_byte_width as u64 * height as u64;
     let buffer = device.create_buffer(&BufferDescriptor {

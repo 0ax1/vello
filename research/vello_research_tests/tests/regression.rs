@@ -3,14 +3,16 @@
 
 //! Tests to ensure that certain issues which don't deserve a test scene don't regress
 
+use std::sync::Arc;
+
 use scenes::ImageCache;
 use scenes::SimpleText;
 use vello::{
     AaConfig, Scene,
     kurbo::{Affine, Rect, RoundedRect, Stroke},
     peniko::{
-        Color, ColorStop, Extend, Gradient, ImageFormat, ImageQuality, InterpolationAlphaSpace,
-        color::palette,
+        Blob, Color, ColorStop, Extend, Gradient, ImageAlphaType, ImageData, ImageFormat,
+        ImageQuality, InterpolationAlphaSpace, color::palette,
     },
 };
 use vello_research_tests::{TestParams, smoke_snapshot_test_sync, snapshot_test_sync};
@@ -263,4 +265,42 @@ fn many_bins_gpu() {
 #[cfg_attr(skip_gpu_tests, ignore)]
 fn many_bins_cpu() {
     many_bins(true);
+}
+
+/// Test for <https://github.com/linebender/vello/issues/1948>
+fn image_after_image_free_render(use_cpu: bool) {
+    let image = ImageData {
+        data: Blob::new(Arc::new([255_u8, 0, 0, 255].repeat(4))),
+        format: ImageFormat::Rgba8,
+        width: 2,
+        height: 2,
+        alpha_type: ImageAlphaType::Alpha,
+    };
+    let mut image_scene = Scene::new();
+    image_scene.draw_image(&image, Affine::IDENTITY);
+    let params = TestParams {
+        use_cpu,
+        ..TestParams::new("image_after_image_free_render", 2, 2)
+    };
+    // An empty scene has no images, gradients or glyphs to resolve.
+    let scenes = [&image_scene, &Scene::new(), &image_scene];
+    let rendered =
+        pollster::block_on(vello_research_tests::get_scenes_image(&params, &scenes)).unwrap();
+    assert_eq!(
+        rendered.data.data(),
+        image.data.data(),
+        "the image should still render after a render without images"
+    );
+}
+
+#[test]
+#[cfg_attr(skip_gpu_tests, ignore)]
+fn image_after_image_free_render_gpu() {
+    image_after_image_free_render(false);
+}
+
+#[test]
+#[cfg_attr(skip_gpu_tests, ignore)]
+fn image_after_image_free_render_cpu() {
+    image_after_image_free_render(true);
 }

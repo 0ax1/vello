@@ -187,8 +187,15 @@ impl Resolver {
     ) -> (Layout, Ramps<'a>, Images<'a>) {
         let resources = &encoding.resources;
         if resources.patches.is_empty() {
+            // There is nothing to upload. Still report the atlas of resident images, so that the
+            // renderer keeps the texture they are stored in.
+            self.image_cache.begin_resolve();
             let layout = resolve_solid_paths_only(encoding, packed);
-            return (layout, Ramps::default(), Images::default());
+            return (
+                layout,
+                Ramps::default(),
+                self.image_cache.images_for_patchless_resolve(),
+            );
         }
         let patch_sizes = self.resolve_patches(encoding);
         self.resolve_pending_images();
@@ -649,4 +656,40 @@ fn size_to_words(byte_size: usize) -> u32 {
 
 fn align_up(len: usize, alignment: u32) -> usize {
     len + (len.wrapping_neg() & (alignment as usize - 1))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use peniko::{Blob, ImageAlphaType, ImageBrush, ImageFormat};
+
+    #[test]
+    fn patchless_resolve_keeps_image_atlas() {
+        let image = ImageData {
+            data: Blob::new(Arc::new(vec![255; 4])),
+            format: ImageFormat::Rgba8,
+            width: 1,
+            height: 1,
+            alpha_type: ImageAlphaType::Alpha,
+        };
+        let mut image_encoding = Encoding::new();
+        image_encoding.encode_image(&ImageBrush::new(image), 1.0);
+        let patchless_encoding = Encoding::new();
+        let mut resolver = Resolver::new();
+        let mut packed = Vec::new();
+
+        // Without resident images, there is no atlas to keep.
+        let (_, _, images) = resolver.resolve(&patchless_encoding, &mut packed);
+        assert_eq!((images.width, images.height), (0, 0));
+
+        let (_, _, images) = resolver.resolve(&image_encoding, &mut packed);
+        assert_eq!(images.images.len(), 1);
+        let atlas_size = (images.width, images.height);
+
+        // The resident image is clean and won't be uploaded again, so the renderer must keep
+        // the atlas that holds it.
+        let (_, _, images) = resolver.resolve(&patchless_encoding, &mut packed);
+        assert_eq!((images.width, images.height), atlas_size);
+        assert!(images.images.is_empty());
+    }
 }
